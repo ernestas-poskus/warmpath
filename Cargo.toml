@@ -1,0 +1,31 @@
+[package]
+name = "warmpath"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Provider-agnostic prompt-cache accounting, warm-session decisions, and metric gates for coding agents."
+repository = "https://github.com/ernestas-poskus/warmpath"
+documentation = "https://docs.rs/warmpath"
+readme = "README.md"
+keywords = ["prompt-caching", "tokens", "metrics", "coding-agents", "tokio"]
+categories = ["caching", "development-tools"]
+
+# A standalone workspace: the crate stands alone (its own lockfile, README, LICENSE, and CI) and
+# other projects consume it as a library or a path dependency.
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["-D", "warnings"]
