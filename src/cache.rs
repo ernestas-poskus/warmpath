@@ -23,7 +23,7 @@ use crate::prefix::{PrefixChange, digest};
 use crate::reported::Reported;
 
 /// The semantics-contract version this build records.
-pub const SEMANTICS_VERSION: u32 = 1;
+pub const SEMANTICS_VERSION: u32 = 2;
 
 /// The provider's cache mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -138,6 +138,22 @@ impl CacheContract {
         self.write_multiplier.saturating_sub(self.read_multiplier)
     }
 
+    /// Expected prompt tokens saved when `copies` requests would each write the same prefix and
+    /// only the first actually writes it: `(copies - 1) * prefix * (w - r)`.
+    ///
+    /// An estimate from declared multipliers, never a measured saving. `None` for a strict
+    /// contract (nothing is claimed) or fewer than two copies.
+    #[must_use]
+    pub fn repeated_reuse_saving(&self, prefix: Tokens, copies: u32) -> Option<Tokens> {
+        if self.is_strict() || copies < 2 {
+            return None;
+        }
+        let per_extra = self.reuse_net_saving().multiply_tokens(prefix);
+        Some(Tokens::new(
+            per_extra.get().saturating_mul(u64::from(copies - 1)),
+        ))
+    }
+
     /// The minimum prompt length this contract can cache, when declared.
     #[must_use]
     pub const fn minimum_tokens(&self) -> Option<Tokens> {
@@ -156,6 +172,10 @@ pub enum ProviderFamily {
     DeepSeek,
     /// Google Gemini's implicit cache (explicit caching is legacy-only).
     Gemini,
+    /// xAI's automatic prefix cache (Grok models).
+    Xai,
+    /// Moonshot's implicit prefix cache (Kimi models).
+    Moonshot,
     /// Anything else: strict.
     Unknown,
 }
@@ -169,6 +189,8 @@ impl ProviderFamily {
             "codex" | "openai" => ProviderFamily::OpenAi,
             "deepseek" => ProviderFamily::DeepSeek,
             "gemini" | "google" => ProviderFamily::Gemini,
+            "xai" | "grok" => ProviderFamily::Xai,
+            "moonshot" | "kimi" => ProviderFamily::Moonshot,
             _ => ProviderFamily::Unknown,
         }
     }
@@ -192,6 +214,19 @@ fn anthropic_minimum(model: &str) -> Option<Tokens> {
         Some(Tokens::new(2_048))
     } else {
         Some(Tokens::new(1_024))
+    }
+}
+
+/// The xAI cache-read discount, model-dependent where the provider documents one.
+///
+/// No TTL and no minimum cacheable length are published, so the contract keeps those unknown;
+/// the read multiplier is the one documented number and it differs between model lines.
+fn xai_read_multiplier(model: &str) -> Ratio {
+    let model = model.to_ascii_lowercase();
+    if model.contains("grok-build") {
+        ratio(1, 5)
+    } else {
+        ratio(1, 4)
     }
 }
 
@@ -254,6 +289,28 @@ pub fn semantics(provider: &ProviderId, model: Option<&ModelId>) -> CacheContrac
             minimum_tokens: Some(Tokens::new(2_050)),
             explicit_legacy_only: true,
             note: "implicit caching is automatic and opportunistic with a >=2050-token rule; explicit context caching is legacy-only",
+        },
+        ProviderFamily::Xai => CacheContract {
+            mode: CacheMode::Automatic,
+            ttl: CacheTtl::Unknown,
+            read_multiplier: xai_read_multiplier(&model_text),
+            write_multiplier: ratio(1, 1),
+            long_write_multiplier: None,
+            long_ttl: None,
+            minimum_tokens: None,
+            explicit_legacy_only: false,
+            note: "automatic prefix cache; the read discount is model-dependent (about 0.25x for grok-4.7, 0.2x for grok-build); TTL and minimum are undocumented",
+        },
+        ProviderFamily::Moonshot => CacheContract {
+            mode: CacheMode::Automatic,
+            ttl: CacheTtl::Seconds(TtlSecs::new(300).expect("non-zero")),
+            read_multiplier: ratio(1, 10),
+            write_multiplier: ratio(1, 1),
+            long_write_multiplier: Some(ratio(2, 1)),
+            long_ttl: TtlSecs::new(3_600),
+            minimum_tokens: None,
+            explicit_legacy_only: false,
+            note: "implicit prefix cache; 5m default at 1.0x write, 1h at 2x; reads ~0.1x; minimum and cache block size are unpublished",
         },
         ProviderFamily::Unknown => strict(),
     }
@@ -333,6 +390,11 @@ pub struct CacheIdentity {
     pub model: Option<ModelId>,
     /// The reasoning effort, when the route has one.
     pub effort: Option<String>,
+    /// The speed class the route selects (for example a fast mode), when it has one.
+    ///
+    /// Providers that key their cache by speed treat a speed change as a different cache series;
+    /// an absent speed is unknown and never claims a match.
+    pub speed: Option<String>,
     /// The session key the request continues, when it continues one.
     pub session_key: Option<String>,
 }
@@ -348,6 +410,7 @@ impl CacheIdentity {
             provider,
             model: None,
             effort: None,
+            speed: None,
             session_key: None,
         }
     }
@@ -363,6 +426,13 @@ impl CacheIdentity {
     #[must_use]
     pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
         self.effort = Some(effort.into());
+        self
+    }
+
+    /// Set the speed class.
+    #[must_use]
+    pub fn with_speed(mut self, speed: impl Into<String>) -> Self {
+        self.speed = Some(speed.into());
         self
     }
 
@@ -402,6 +472,7 @@ impl CacheIdentity {
         };
         let model = normalize(self.model.as_ref().map(ModelId::as_str));
         let effort = normalize(self.effort.as_deref());
+        let speed = normalize(self.speed.as_deref());
         let session = normalize(self.session_key.as_deref());
         let tools = self
             .tools
@@ -415,6 +486,7 @@ impl CacheIdentity {
             self.provider.as_str().as_bytes(),
             model.as_bytes(),
             effort.as_bytes(),
+            speed.as_bytes(),
             session.as_bytes(),
         ])
     }
@@ -681,6 +753,50 @@ mod tests {
     }
 
     #[test]
+    fn the_researched_families_are_declared_without_inventing_a_ttl() {
+        let moonshot = semantics(&provider("moonshot"), Some(&model("kimi-k3")));
+        assert_eq!(moonshot.mode, CacheMode::Automatic);
+        assert_eq!(
+            moonshot.ttl,
+            CacheTtl::Seconds(TtlSecs::new(300).expect("non-zero"))
+        );
+        assert_eq!(moonshot.read_multiplier, ratio(1, 10));
+        assert_eq!(moonshot.write_multiplier, ratio(1, 1));
+        assert_eq!(moonshot.long_ttl, TtlSecs::new(3_600));
+        assert_eq!(moonshot.long_write_multiplier, Some(ratio(2, 1)));
+        assert_eq!(moonshot.minimum_tokens, None, "the minimum is unpublished");
+
+        let xai = semantics(&provider("grok"), Some(&model("grok-4.7")));
+        assert_eq!(xai.mode, CacheMode::Automatic);
+        assert_eq!(xai.ttl, CacheTtl::Unknown);
+        assert_eq!(xai.read_multiplier, ratio(1, 4));
+        assert_eq!(xai.minimum_tokens, None);
+
+        let build = semantics(&provider("xai"), Some(&model("grok-build-0.1")));
+        assert_eq!(build.read_multiplier, ratio(1, 5));
+        assert_eq!(
+            build.reuse_net_saving(),
+            Ratio::new(4, 5).expect("non-zero")
+        );
+    }
+
+    #[test]
+    fn a_repeated_prefix_reuse_saves_write_minus_read_per_extra_copy() {
+        let claude = semantics(&provider("claude"), Some(&model("claude-sonnet-4")));
+        // 1 000 tokens * 1.15 net saving = 1 150 per extra copy; 4 copies means 3 extra.
+        assert_eq!(
+            claude.repeated_reuse_saving(Tokens::new(1_000), 4),
+            Some(Tokens::new(3_450))
+        );
+        assert_eq!(claude.repeated_reuse_saving(Tokens::new(1_000), 1), None);
+        assert_eq!(
+            strict().repeated_reuse_saving(Tokens::new(1_000), 4),
+            None,
+            "a strict contract claims nothing"
+        );
+    }
+
+    #[test]
     fn an_identity_digest_changes_with_every_field() {
         let prefix = crate::prefix::digest(&[b"prefix"]);
         let base = CacheIdentity::new(prefix.clone(), harness("codex"), provider("openai"));
@@ -688,6 +804,11 @@ mod tests {
         assert_eq!(base.clone().digest(), digest, "stable");
         assert_ne!(base.clone().with_model(model("m")).digest(), digest);
         assert_ne!(base.clone().with_effort("high").digest(), digest);
+        assert_ne!(
+            base.clone().with_speed("fast").digest(),
+            digest,
+            "the speed class is part of the cache identity"
+        );
         assert_ne!(base.clone().with_session("s").digest(), digest);
         assert_ne!(
             base.with_tools(crate::prefix::digest(&[b"tools"])).digest(),

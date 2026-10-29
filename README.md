@@ -59,6 +59,11 @@ which `cargo test --doc` compiles and runs.
   route.
 - **A warm decision with evidence.** Identity, TTL (a step at expiry), file overlap, and the
   `(w − r)` resume counterfactual, plus stable mismatch/rejection codes.
+- **Agent topology as declared data.** `topology::NodeKind` (root/subagent/fork),
+  `PrefixInheritance`, `ChildUsage`, a versioned per-harness capability table where an unknown
+  harness claims nothing, and `CohortKey` for sibling runs that may share one prefix write. A fork
+  may read its parent's write, a subagent starts its own, and a parent's usage may or may not
+  include its children — the crate keeps those apart instead of assuming one shape.
 - **An identity that includes the tool surface, and an append-only gate.** `ToolManifest` is a
   canonical, order-insensitive digest of tool definitions with the names included, so a rename is
   a different surface and a discovery shuffle is not; `CacheIdentity` carries it, and
@@ -70,9 +75,11 @@ which `cargo test --doc` compiles and runs.
 - **Calibration and scheduling.** Age-band warm-resume reports with a two-warm-sample floor, and a
   deterministic cache-aware batch order.
 - **Pre-provider savings attribution.** `savings` sums what the request path removed before it
-  reached the provider — ingest-stage and request-stage reductions, each reported or measured. A
-  reported saving never invents a before/after, and the pre-provider total is claimed only when
-  every stage was measured. Provider cache savings stay in the cache/metric modules, not here.
+  reached the provider — ingest-stage and request-stage reductions, each reported, measured, or
+  partial. A reported saving never invents a before/after, a partial stage retains its known sum as
+  a lower bound while total and before totals remain absent, and the pre-provider total is claimed
+  only when every stage was measured. Provider cache savings stay in the cache/metric modules, not
+  here.
 - **Async artifact storage.** Path-confined names, bounded reads, atomic no-clobber publishes,
   recorded identities, and validation of untrusted metric artifacts.
 
@@ -140,6 +147,8 @@ as `99.7`; `0.997` is **not** accepted as a fraction — bare numbers are percen
 ## Documentation
 
 - API: <https://docs.rs/warmpath> · Design: [`docs/DESIGN.md`](docs/DESIGN.md) · Changelog: [`CHANGELOG.md`](CHANGELOG.md)
+- Research: [`docs/research/README.md`](docs/research/README.md) — provider caching mechanics, harness
+  practices, and the strategy verdicts behind the crate's design.
 
 ## License
 

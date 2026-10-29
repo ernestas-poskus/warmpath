@@ -58,6 +58,7 @@ pub mod prompt;
 pub mod reported;
 pub mod savings;
 pub mod schedule;
+pub mod topology;
 pub mod usage;
 pub mod warm;
 
@@ -72,6 +73,9 @@ pub use profile::{HarnessProfile, InputShape, OutputShape};
 pub use prompt::PromptTokens;
 pub use reported::Reported;
 pub use savings::{ReductionStage, SavingsBasis, SavingsError, SavingsObservation, SavingsReport};
+pub use topology::{
+    ChildUsage, CohortKey, NodeKind, PrefixInheritance, TOPOLOGY_VERSION, TopologyCapabilities,
+};
 
 /// The crate version, recorded in artifact provenance so a reader can tell which build wrote it.
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");

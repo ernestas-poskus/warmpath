@@ -311,7 +311,7 @@ impl HarnessProfile {
     #[must_use]
     pub fn agy() -> Self {
         Self {
-            profile_id: ProfileId::new("agy-v1").expect("static profile id"),
+            profile_id: ProfileId::new("agy-v2").expect("static profile id"),
             profile_version: PROFILE_SCHEMA_VERSION,
             harness: HarnessId::new("agy").expect("static harness id"),
             provider: ProviderId::new("agy").expect("static provider id"),
@@ -327,13 +327,13 @@ impl HarnessProfile {
                     "usage.cache_read_input_tokens",
                 ],
                 &["usage.cache_creation_tokens"],
-                &["usage.reasoning_tokens"],
+                &["usage.thinking_tokens", "usage.reasoning_tokens"],
             ),
             step_event: None,
             version_range: VersionRange::any(),
             cumulative_usage: false,
             session_paths: vec!["conversation_id".to_owned(), "conversationId".to_owned()],
-            resume_argv: vec!["--resume".to_owned(), "{session}".to_owned()],
+            resume_argv: vec!["--conversation".to_owned(), "{session}".to_owned()],
             assign_argv: Vec::new(),
             assignable: false,
             warm_ttl: TtlSecs::new(300),
@@ -378,19 +378,25 @@ impl HarnessProfile {
     #[must_use]
     pub fn grok() -> Self {
         Self {
-            profile_id: ProfileId::new("grok-v1").expect("static profile id"),
+            profile_id: ProfileId::new("grok-v2").expect("static profile id"),
             profile_version: PROFILE_SCHEMA_VERSION,
             harness: HarnessId::new("grok").expect("static harness id"),
             provider: ProviderId::new("grok").expect("static provider id"),
-            cache_class: CacheClass::Strict,
+            cache_class: CacheClass::Automatic,
             output_shape: OutputShape::Json,
-            input_shape: InputShape::Exclusive,
+            input_shape: InputShape::Inclusive,
             usage_paths: UsagePaths::new(
-                &["usage.input_tokens"],
-                &["usage.output_tokens"],
-                &["usage.cached_input_tokens"],
-                &["usage.cache_creation_tokens"],
-                &["usage.reasoning_tokens"],
+                &["usage.prompt_tokens", "usage.input_tokens"],
+                &["usage.completion_tokens", "usage.output_tokens"],
+                &[
+                    "usage.prompt_tokens_details.cached_tokens",
+                    "usage.input_tokens_details.cached_tokens",
+                ],
+                &[],
+                &[
+                    "usage.completion_tokens_details.reasoning_tokens",
+                    "usage.output_tokens_details.reasoning_tokens",
+                ],
             ),
             step_event: None,
             version_range: VersionRange::any(),
@@ -594,6 +600,38 @@ mod tests {
         assert!(range.supports(&HarnessVersion::new("1.10.0").expect("valid")));
         assert!(range.supports(&HarnessVersion::new("2.0.0").expect("valid")));
         assert!(VersionRange::any().supports(&HarnessVersion::new("weird").expect("valid")));
+    }
+
+    #[test]
+    fn a_grok_profile_matches_the_documented_xai_usage_fields() {
+        let grok = HarnessProfile::grok();
+        assert_eq!(grok.profile_id.as_str(), "grok-v2");
+        assert_eq!(grok.input_shape, InputShape::Inclusive);
+        assert_eq!(grok.cache_class, CacheClass::Automatic);
+        assert!(
+            grok.usage_paths
+                .cache_read
+                .iter()
+                .any(|path| path == "usage.prompt_tokens_details.cached_tokens"),
+            "xAI nests the cached count under prompt_tokens_details"
+        );
+        assert!(
+            grok.usage_paths.cache_write.is_empty(),
+            "xAI documents no cache-write field"
+        );
+        assert_eq!(grok.warm_ttl, None, "no cache TTL is documented");
+    }
+
+    #[test]
+    fn an_agy_profile_resumes_with_its_own_dialect() {
+        let agy = HarnessProfile::agy();
+        assert_eq!(agy.profile_id.as_str(), "agy-v2");
+        assert_eq!(agy.resume_argv, vec!["--conversation", "{session}"]);
+        assert_eq!(
+            agy.usage_paths.reasoning.first().map(String::as_str),
+            Some("usage.thinking_tokens")
+        );
+        assert_eq!(agy.provider.as_str(), "agy", "the gateway stays strict");
     }
 
     #[test]

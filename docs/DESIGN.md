@@ -6,7 +6,9 @@ Every application that orchestrates a coding agent re-invents the same fragile a
 provider really charged for prompt tokens, whether the previous session can be resumed, and what a
 "cache hit rate" even means. The failure mode is always the same — an absence of data silently
 becomes a zero, and a zero becomes a percentage that drives a decision. `warmpath` is the fixed
-version of that accounting, published as a library so it can be reviewed once.
+version of that accounting, published as a library so it can be reviewed once. The research it
+rests on — provider mechanics, harness practices, and the strategies considered — is collected in
+[`research/README.md`](research/README.md).
 
 ## The two rules
 
@@ -69,6 +71,22 @@ cache entry, so an identity that compared equal would be lying. An absent surfac
 unknown, never a claimed match. `first_request_break` names a changed surface before the prefix
 rewrite it causes, because the surface is the cause and the one break a caller can fix.
 
+## Topology is declared, not inferred
+
+A request's cache identity describes bytes; it does not describe the agent topology those bytes
+belong to. The same prefix can be sent by a root, a subagent, a fork, or a sibling fan-out, and
+those differ in a way that changes reuse and attribution: a fork may read its parent's write, a
+subagent starts its own, and a parent's reported usage may or may not include its children's.
+
+`topology` makes that structure a contract. `NodeKind` names the instance (root, subagent, fork);
+`PrefixInheritance` distinguishes an inherited parent prefix from an own prefix, a shared routing
+key, and an undocumented relationship; `ChildUsage` keeps separate, inclusive, and unknown child
+accounting apart. `capabilities(harness)` is a small, versioned table of what the harness
+documents — the same "unknown is strict" rule the provider table follows — and `CohortKey` names
+the identity facts a sibling fan-out groups on, so a cohort groups nodes and is never an identity
+itself. A root always owns its prefix; inheritance is claimed only when the table says
+`InheritsParent`.
+
 ## The append-only invariant is checkable
 
 The cache unit is an exact byte prefix, so a request sequence is only expectably warm while every
@@ -97,12 +115,15 @@ Two reduction stages can remove prompt work before a request reaches its provide
 order: `Ingest` and `Request`. `savings` attributes them and nothing else. Provider-side cache
 savings are a billing fact, not a reduction, and never enter this total.
 
-The contract is deliberately narrow. A stage either **reports** how much it removed or is
-**measured** before and after; the report never derives a before/after from a reported count. The
-saved total exists only when every observation is recording and usable — an absent or disabled
-observation is `None`, not zero — and the pre-provider ("before") total exists only when every
-stage was measured, because the stages are sequential and summing their `before` values would count
-the prompt once per stage. Duplicate stages and a measured pair with `before < after` are
+The contract is deliberately narrow. A stage either **reports** how much it removed, is
+**measured** before and after, or is **partial** (some contributions were measured while others were
+unmeasured). The report never derives a before/after from a reported count. A partial stage keeps
+its known sum as a lower bound (`measured_lower_bound`), while the saved total (`total_saved`) and
+pre-provider total (`total_before`) remain absent (`None`). The saved total exists only when every
+observation is recording and usable — an absent, disabled, or partial observation leaves `total_saved`
+`None`, not zero — and the pre-provider ("before") total exists only when every stage was measured,
+because the stages are sequential and summing their `before` values would count the prompt once per
+stage. Duplicate stages, a measured pair with `before < after`, and invalid partial counts are
 construction errors with stable codes.
 
 ## Artifacts

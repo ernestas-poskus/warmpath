@@ -255,6 +255,19 @@ impl Ratio {
         self.numerator as f64 / self.denominator as f64
     }
 
+    /// Scale a token count by this ratio, rounding half up and saturating at `u64::MAX`.
+    ///
+    /// Used for counterfactual arithmetic (one prefix reused by several requests) where the
+    /// result is an estimate, never a measured count.
+    #[must_use]
+    pub fn multiply_tokens(self, tokens: Tokens) -> Tokens {
+        let scaled = (u128::from(tokens.get())
+            .saturating_mul(self.numerator)
+            .saturating_add(self.denominator / 2))
+            / self.denominator;
+        Tokens::new(u64::try_from(scaled).unwrap_or(u64::MAX))
+    }
+
     /// Subtract another ratio, saturating at zero.
     #[must_use]
     pub fn saturating_sub(self, other: Self) -> Self {

@@ -20,11 +20,15 @@
 //! - [`SavingsBasis::Measured`] requires `before >= after`, and its saving is `before - after`.
 //! - [`SavingsBasis::Reported`] carries a saved count and **no** before/after; the report never
 //!   invents one.
+//! - [`SavingsBasis::Partial`] carries a saved count across a mixed set of measured and unmeasured
+//!   runs along with their counts; it is never complete on its own.
 //! - The pre-provider total (the "before" figure) is only claimed when **every** stage is measured
 //!   ([`SavingsReport::total_before`]).
-//! - The saved total is claimed only when every observation is usable and recording. A disabled or
-//!   invalid observation makes [`SavingsReport::total_saved`] `None` and the report incomplete,
-//!   rather than turning an absence into a zero.
+//! - The saved total is claimed only when every observation is usable and recording. A disabled,
+//!   invalid, or partial observation makes [`SavingsReport::total_saved`] `None` and the report
+//!   incomplete, rather than turning an absence into a zero.
+//! - An incomplete report with partial or usable observations exposes evidence through
+//!   [`SavingsReport::measured_lower_bound`], never as a total.
 //!
 //! # Example
 //!
@@ -119,29 +123,44 @@ pub enum SavingsBasis {
         /// Prompt tokens leaving the stage.
         after: Tokens,
     },
+    /// A stage where some runs were measured and others were unmeasured.
+    Partial {
+        /// Tokens the measured runs removed.
+        saved: Tokens,
+        /// Number of measured runs.
+        measured: u64,
+        /// Number of unmeasured runs.
+        unmeasured: u64,
+    },
 }
 
 impl SavingsBasis {
+    /// Whether this basis is partial (some runs were measured and others were unmeasured).
+    #[must_use]
+    pub const fn is_partial(&self) -> bool {
+        matches!(self, SavingsBasis::Partial { .. })
+    }
+
     /// The saving this basis establishes, or `None` when a measured pair is inconsistent.
     ///
-    /// A reported count is returned as reported; a measured pair is `before - after` only when
-    /// `before >= after`. The report's constructor rejects an inconsistent pair, so a basis that
-    /// came from a [`SavingsReport`] is always consistent.
+    /// A reported or partial count is returned as reported; a measured pair is `before - after`
+    /// only when `before >= after`. The report's constructor rejects an inconsistent pair, so
+    /// a basis that came from a [`SavingsReport`] is always consistent.
     #[must_use]
     pub fn saving(&self) -> Option<Tokens> {
         match self {
-            SavingsBasis::Reported { saved } => Some(*saved),
+            SavingsBasis::Reported { saved } | SavingsBasis::Partial { saved, .. } => Some(*saved),
             SavingsBasis::Measured { before, after } => before.checked_sub(*after),
         }
     }
 
     /// The prompt count before the stage, only when it was measured.
     ///
-    /// A reported saving never invents a denominator; `None` is the honest answer.
+    /// A reported or partial saving never invents a denominator; `None` is the honest answer.
     #[must_use]
     pub const fn before(&self) -> Option<Tokens> {
         match self {
-            SavingsBasis::Reported { .. } => None,
+            SavingsBasis::Reported { .. } | SavingsBasis::Partial { .. } => None,
             SavingsBasis::Measured { before, .. } => Some(*before),
         }
     }
@@ -150,19 +169,19 @@ impl SavingsBasis {
     #[must_use]
     pub const fn after(&self) -> Option<Tokens> {
         match self {
-            SavingsBasis::Reported { .. } => None,
+            SavingsBasis::Reported { .. } | SavingsBasis::Partial { .. } => None,
             SavingsBasis::Measured { after, .. } => Some(*after),
         }
     }
 
     /// The saving as a share of the measured prompt, when both sides were measured.
     ///
-    /// `None` for a reported saving (there is no denominator) and for a zero measured prompt (a
-    /// share of nothing is undefined).
+    /// `None` for a reported or partial saving (there is no denominator) and for a zero measured
+    /// prompt (a share of nothing is undefined).
     #[must_use]
     pub fn saving_bps(&self) -> Option<BasisPoints> {
         match self {
-            SavingsBasis::Reported { .. } => None,
+            SavingsBasis::Reported { .. } | SavingsBasis::Partial { .. } => None,
             SavingsBasis::Measured { before, after } => {
                 let saved = before.checked_sub(*after)?;
                 BasisPoints::from_ratio(u128::from(saved.get()), u128::from(before.get()))
@@ -170,7 +189,7 @@ impl SavingsBasis {
         }
     }
 
-    /// Reject a measured pair whose `before` is below its `after`.
+    /// Reject an inconsistent measured pair or an invalid partial basis.
     fn validate(&self) -> Result<(), SavingsError> {
         match self {
             SavingsBasis::Reported { .. } => Ok(()),
@@ -181,6 +200,15 @@ impl SavingsBasis {
                 })
             }
             SavingsBasis::Measured { .. } => Ok(()),
+            SavingsBasis::Partial {
+                measured,
+                unmeasured,
+                ..
+            } if *measured == 0 || *unmeasured == 0 => Err(SavingsError::InvalidPartial {
+                measured: *measured,
+                unmeasured: *unmeasured,
+            }),
+            SavingsBasis::Partial { .. } => Ok(()),
         }
     }
 }
@@ -210,6 +238,26 @@ impl SavingsObservation {
         }
     }
 
+    /// An observation of a stage where some contributions were measured and others were not.
+    #[must_use]
+    pub const fn partial(
+        stage: ReductionStage,
+        saved: Tokens,
+        measured: u64,
+        unmeasured: u64,
+    ) -> Self {
+        Self {
+            stage,
+            basis: SavingsBasis::Partial {
+                saved,
+                measured,
+                unmeasured,
+            },
+            requests: None,
+            recording: true,
+        }
+    }
+
     /// Attach a request count.
     #[must_use]
     pub const fn with_requests(mut self, requests: u64) -> Self {
@@ -226,15 +274,21 @@ impl SavingsObservation {
 
     /// Whether this observation can contribute to a total.
     ///
-    /// An observation is usable when its accounting ran and its basis establishes a saving. The
-    /// report's constructor rejects an inconsistent measured pair, so in practice this is
-    /// [`SavingsObservation::recording`] once construction succeeded.
+    /// An observation is usable when its accounting ran, its basis establishes a saving, and it
+    /// is not partial. A partial basis represents incomplete evidence rather than a complete
+    /// observation, so it is not usable for a total (though it contributes to
+    /// [`SavingsReport::measured_lower_bound`]). The report's constructor rejects an inconsistent
+    /// measured pair or invalid partial counts.
     #[must_use]
     pub fn is_usable(&self) -> bool {
-        self.recording && self.basis.validate().is_ok()
+        self.recording && !self.basis.is_partial() && self.basis.validate().is_ok()
     }
 
     /// The saving this observation establishes, when it is usable.
+    ///
+    /// Returns `None` when the observation is not usable (disabled, invalid, or partial).
+    /// Partial stage evidence is accessed through [`SavingsReport::measured_lower_bound`],
+    /// never as a stage saving.
     #[must_use]
     pub fn saving(&self) -> Option<Tokens> {
         if self.is_usable() {
@@ -263,6 +317,16 @@ pub enum SavingsError {
         /// Prompt tokens leaving the stage.
         after: Tokens,
     },
+    /// A partial basis must have non-zero counts for both measured and unmeasured contributions.
+    #[error(
+        "a partial saving must have non-zero measured ({measured}) and unmeasured ({unmeasured}) counts"
+    )]
+    InvalidPartial {
+        /// Number of measured runs.
+        measured: u64,
+        /// Number of unmeasured runs.
+        unmeasured: u64,
+    },
 }
 
 impl SavingsError {
@@ -272,6 +336,7 @@ impl SavingsError {
         match self {
             SavingsError::DuplicateStage { .. } => "duplicate_stage",
             SavingsError::BeforeBelowAfter { .. } => "before_below_after",
+            SavingsError::InvalidPartial { .. } => "invalid_partial",
         }
     }
 }
@@ -344,10 +409,11 @@ impl SavingsReport {
         &self.observations
     }
 
-    /// The summed pre-provider saving, or `None` when any observation is disabled or unusable.
+    /// The summed pre-provider saving, or `None` when any observation is disabled, unusable, or
+    /// partial.
     ///
-    /// A missing total is an absence, not a zero: callers must say "unmeasured" rather than report
-    /// `0` for it.
+    /// A missing total is an absence, not a zero: callers must say "unmeasured" or report a
+    /// [`SavingsReport::measured_lower_bound`] rather than report `0` for it.
     #[must_use]
     pub const fn total_saved(&self) -> Option<Tokens> {
         self.total_saved
@@ -362,12 +428,37 @@ impl SavingsReport {
     }
 
     /// The observed saving for one stage.
+    ///
+    /// Returns `None` when the stage was not observed, was disabled, or is partial. Partial
+    /// stage savings contribute to [`SavingsReport::measured_lower_bound`] rather than
+    /// exposing a stage total.
     #[must_use]
     pub fn saved_at(&self, stage: ReductionStage) -> Option<Tokens> {
         self.observations
             .iter()
             .find(|observation| observation.stage == stage)
             .and_then(SavingsObservation::saving)
+    }
+
+    /// The measured pre-provider lower bound, or `None` when no observation was usable or partial.
+    ///
+    /// Sums the basis saving of every usable observation and every partial observation. For a
+    /// complete report, this equals [`SavingsReport::total_saved`]. For an incomplete report, this
+    /// provides lower-bound evidence of what was measured, never presenting it as a total.
+    #[must_use]
+    pub fn measured_lower_bound(&self) -> Option<Tokens> {
+        let mut any = false;
+        let mut sum = Tokens::ZERO;
+        for observation in &self.observations {
+            if (observation.is_usable()
+                || (observation.recording && observation.basis.is_partial()))
+                && let Some(saving) = observation.basis.saving()
+            {
+                any = true;
+                sum = sum.saturating_add(saving);
+            }
+        }
+        if any { Some(sum) } else { None }
     }
 
     /// The prompt count **before** the reductions, only when every stage was measured.
@@ -650,5 +741,152 @@ mod tests {
             Some(BasisPoints::MAX),
             "a full saving is 100% and the newtype clamps there"
         );
+    }
+
+    #[test]
+    fn a_partial_basis_never_exposes_before_after_or_share() {
+        let basis = SavingsBasis::Partial {
+            saved: Tokens::new(500),
+            measured: 2,
+            unmeasured: 1,
+        };
+        assert_eq!(basis.saving(), Some(Tokens::new(500)));
+        assert_eq!(basis.before(), None);
+        assert_eq!(basis.after(), None);
+        assert_eq!(basis.saving_bps(), None);
+        assert!(basis.is_partial());
+        assert!(
+            !SavingsBasis::Reported {
+                saved: Tokens::new(500)
+            }
+            .is_partial()
+        );
+    }
+
+    #[test]
+    fn a_partial_basis_requires_non_zero_measured_and_unmeasured_counts() {
+        assert_eq!(
+            SavingsBasis::Partial {
+                saved: Tokens::new(100),
+                measured: 0,
+                unmeasured: 1,
+            }
+            .validate(),
+            Err(SavingsError::InvalidPartial {
+                measured: 0,
+                unmeasured: 1,
+            })
+        );
+        assert_eq!(
+            SavingsBasis::Partial {
+                saved: Tokens::new(100),
+                measured: 1,
+                unmeasured: 0,
+            }
+            .validate(),
+            Err(SavingsError::InvalidPartial {
+                measured: 1,
+                unmeasured: 0,
+            })
+        );
+        let error = SavingsError::InvalidPartial {
+            measured: 0,
+            unmeasured: 2,
+        };
+        assert_eq!(error.code(), "invalid_partial");
+        assert!(error.to_string().contains("0"));
+        assert!(error.to_string().contains("2"));
+    }
+
+    #[test]
+    fn a_report_with_partial_ingest_and_reported_request() {
+        let report = SavingsReport::from_observations(&[
+            SavingsObservation::partial(ReductionStage::Ingest, Tokens::new(1_200), 2, 1),
+            reported(ReductionStage::Request, 150),
+        ])
+        .expect("valid observations");
+        assert_eq!(report.total_saved(), None);
+        assert!(!report.is_complete());
+        assert_eq!(report.measured_lower_bound(), Some(Tokens::new(1_350)));
+        assert_eq!(report.saved_at(ReductionStage::Ingest), None);
+        assert_eq!(
+            report.saved_at(ReductionStage::Request),
+            Some(Tokens::new(150))
+        );
+        assert_eq!(report.total_before(), None);
+    }
+
+    #[test]
+    fn a_report_with_only_non_recording_placeholders_has_no_lower_bound() {
+        let report = SavingsReport::from_observations(&[
+            SavingsObservation::new(
+                ReductionStage::Ingest,
+                SavingsBasis::Reported {
+                    saved: Tokens::ZERO,
+                },
+            )
+            .with_recording(false),
+            SavingsObservation::new(
+                ReductionStage::Request,
+                SavingsBasis::Reported {
+                    saved: Tokens::ZERO,
+                },
+            )
+            .with_recording(false),
+        ])
+        .expect("valid placeholders");
+        assert_eq!(report.measured_lower_bound(), None);
+        assert_eq!(report.total_saved(), None);
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn a_complete_reports_lower_bound_equals_its_total() {
+        let report = SavingsReport::from_observations(&[
+            reported(ReductionStage::Ingest, 1_200),
+            measured(ReductionStage::Request, 5_000, 4_000),
+        ])
+        .expect("valid");
+        assert_eq!(report.measured_lower_bound(), report.total_saved());
+        assert_eq!(report.measured_lower_bound(), Some(Tokens::new(2_200)));
+    }
+
+    #[test]
+    fn a_partial_whose_measured_sum_is_zero_yields_some_zero_without_becoming_complete() {
+        let report = SavingsReport::from_observations(&[SavingsObservation::partial(
+            ReductionStage::Ingest,
+            Tokens::ZERO,
+            1,
+            1,
+        )])
+        .expect("valid partial");
+        assert_eq!(report.measured_lower_bound(), Some(Tokens::ZERO));
+        assert_eq!(report.total_saved(), None);
+        assert!(!report.is_complete());
+    }
+
+    #[test]
+    fn a_partial_observation_and_report_round_trip_through_serde() {
+        let obs = SavingsObservation::partial(ReductionStage::Ingest, Tokens::new(1_200), 2, 1);
+        let obs_json = serde_json::to_string(&obs).expect("serializes");
+        assert!(obs_json.contains("\"kind\":\"partial\""));
+        assert!(obs_json.contains("\"measured\":2"));
+        assert!(obs_json.contains("\"unmeasured\":1"));
+        let obs_decoded: SavingsObservation =
+            serde_json::from_str(&obs_json).expect("deserializes");
+        assert_eq!(obs_decoded, obs);
+
+        let report =
+            SavingsReport::from_observations(&[obs, reported(ReductionStage::Request, 150)])
+                .expect("valid report");
+        let report_json = serde_json::to_string(&report).expect("serializes");
+        let report_decoded: SavingsReport =
+            serde_json::from_str(&report_json).expect("deserializes");
+        assert_eq!(report_decoded, report);
+        assert_eq!(
+            report_decoded.measured_lower_bound(),
+            Some(Tokens::new(1_350))
+        );
+        assert_eq!(report_decoded.total_saved(), None);
     }
 }

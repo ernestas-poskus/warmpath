@@ -235,3 +235,45 @@ fn a_mixed_savings_report_sums_stages_without_inventing_a_before() {
     );
     assert!(report.is_complete());
 }
+
+#[test]
+fn a_partial_savings_report_yields_a_lower_bound_without_a_total() {
+    use warmpath::savings::{ReductionStage, SavingsBasis, SavingsObservation, SavingsReport};
+
+    let report = SavingsReport::from_observations(&[
+        SavingsObservation::partial(ReductionStage::Ingest, Tokens::new(1_200), 2, 1),
+        SavingsObservation::new(
+            ReductionStage::Request,
+            SavingsBasis::Reported {
+                saved: Tokens::new(150),
+            },
+        ),
+    ])
+    .expect("valid observations");
+
+    assert!(!report.is_complete());
+    assert_eq!(report.total_saved(), None);
+    assert_eq!(report.measured_lower_bound(), Some(Tokens::new(1_350)));
+    assert_eq!(
+        report.total_before(),
+        None,
+        "a partial report does not claim a total before"
+    );
+    assert_eq!(
+        report.saved_at(ReductionStage::Ingest),
+        None,
+        "partial stage savings are not exposed as a stage total"
+    );
+    assert_eq!(
+        report.saved_at(ReductionStage::Request),
+        Some(Tokens::new(150))
+    );
+
+    let serialized = serde_json::to_string(&report).expect("serializes");
+    let deserialized: SavingsReport = serde_json::from_str(&serialized).expect("deserializes");
+    assert_eq!(deserialized, report);
+    assert_eq!(
+        deserialized.measured_lower_bound(),
+        Some(Tokens::new(1_350))
+    );
+}
