@@ -50,6 +50,7 @@ pub mod artifact;
 pub mod cache;
 pub mod calibration;
 pub mod error;
+pub mod fanout;
 pub mod gate;
 pub mod newtypes;
 pub mod prefix;
@@ -58,11 +59,15 @@ pub mod prompt;
 pub mod reported;
 pub mod savings;
 pub mod schedule;
+pub mod shadow;
 pub mod topology;
 pub mod usage;
 pub mod warm;
 
 pub use error::Error;
+pub use fanout::{
+    FanoutDecision, FanoutKey, FanoutMark, FanoutPlan, FanoutRelease, plan_fanout_warmup,
+};
 pub use newtypes::{
     ArtifactDigest, BasisPoints, CacheWriteTokens, CachedTokens, ContractId, ContractVersion,
     EpochSeconds, FreshTokens, HarnessId, HarnessVersion, ModelId, OutputTokens, PrefixDigest,
@@ -73,6 +78,10 @@ pub use profile::{HarnessProfile, InputShape, OutputShape};
 pub use prompt::PromptTokens;
 pub use reported::Reported;
 pub use savings::{ReductionStage, SavingsBasis, SavingsError, SavingsObservation, SavingsReport};
+pub use shadow::{
+    ShadowObservation, ShadowSummary, dynamic_tail_key, exact_request_key,
+    summarize as summarize_shadow,
+};
 pub use topology::{
     ChildUsage, CohortKey, NodeKind, PrefixInheritance, TOPOLOGY_VERSION, TopologyCapabilities,
 };

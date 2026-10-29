@@ -72,8 +72,12 @@ which `cargo test --doc` compiles and runs.
 - **Metric contracts.** AICS (token-weighted cached share, cold included) and EEPR (expected-prefix
   reuse, warm only with cold reported separately), with exported exclusions, per-request
   distributions, write amplification, and integer dollar savings.
-- **Calibration and scheduling.** Age-band warm-resume reports with a two-warm-sample floor, and a
-  deterministic cache-aware batch order.
+- **Calibration and scheduling.** Age-band warm-resume reports with a two-warm-sample floor, a
+  deterministic cache-aware batch order, and the pure fan-out warm-up decision
+  (`plan_fanout_warmup`): which cold members of a same-prefix cohort start now, which wait, and why.
+- **Measurement without a serving path.** `shadow` builds the exact-request and normalized-tail
+  digests and the duplicate summary a replay or semantic cache would need — no store, no lookup, and
+  no way to serve a request.
 - **Pre-provider savings attribution.** `savings` sums what the request path removed before it
   reached the provider — ingest-stage and request-stage reductions, each reported, measured, or
   partial. A reported saving never invents a before/after, a partial stage retains its known sum as

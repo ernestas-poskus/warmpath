@@ -8,6 +8,14 @@ versioning for the public API.
 
 ### Added
 
+- `fanout` module: `FanoutKey`/`FanoutMark`/`FanoutDecision`/`FanoutPlan`/`FanoutRelease` and
+  `plan_fanout_warmup`, the pure fan-out warm-up decision (which cold members of a same-key cohort
+  start now, which wait, and why). It reads no clock beyond the caller's instant and performs no I/O;
+  the dispatch plane supplies the keys and marks and records the release reason as evidence.
+- `shadow` module: `exact_request_key`, `dynamic_tail_key`, `ShadowObservation`, `ShadowSummary`, and
+  `summarize` — the measurement-only keys a replay or semantic cache would need, as digests with no
+  store, no lookup, and no serving path. A caller maps its persisted record onto the borrowed
+  observation.
 - `SavingsBasis::Partial`, `SavingsObservation::partial`, `SavingsReport::measured_lower_bound`, and
   `SavingsError::InvalidPartial`: pre-provider savings support for stages where some runs were
   measured and others unmeasured. A partial stage keeps its known measured sum as a lower bound

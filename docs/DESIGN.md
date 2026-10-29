@@ -87,6 +87,23 @@ the identity facts a sibling fan-out groups on, so a cohort groups nodes and is 
 itself. A root always owns its prefix; inheritance is claimed only when the table says
 `InheritsParent`.
 
+## Warm-up scheduling and reuse measurement are pure decisions
+
+Two decisions do not belong to any one dispatch plane, so they are values here rather than policy
+inside an engine. `fanout::plan_fanout_warmup` answers one question over borrowed keys and marks:
+which cold members of a same-prefix cohort should start now, which should wait, and why
+(`finished_in_ttl`, `started_hold_ticks`, `first_admitted`). The caller supplies `now`, the TTL, and
+the release window; the function reads no clock and performs no I/O. A cohort id derived from a
+rendered request is the dispatch plane's evidence that the grouping was real — the planner makes no
+such claim itself.
+
+`shadow` answers the measurement a replay or semantic cache would have to precede. `exact_request_key`
+digests every identity fact of a request (prefix, tool surface, route, model, effort, payload), and
+`dynamic_tail_key` digests the normalized dynamic tail of a document with the static head removed.
+`summarize` counts duplicate groups, duplicate runs, and zero-usage observations. Nothing here stores
+a payload or can serve a request: the keys are digests, the summary is a measurement, and the module
+has no lookup path.
+
 ## The append-only invariant is checkable
 
 The cache unit is an exact byte prefix, so a request sequence is only expectably warm while every
